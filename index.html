@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Visor PDF Seguro</title>
+  <!-- PDF.js CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  </script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #2a2a2e; color: #fff; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    
+    /* Barra de Herramientas */
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; background-color: #1e1e21; padding: 10px 14px; border-bottom: 1px solid #38383d; }
+    .toolbar-group { display: flex; align-items: center; gap: 6px; }
+    button, input { background: #38383d; color: #fff; border: none; padding: 6px 12px; border-radius: 4px; font-size: 13px; outline: none; }
+    button:active { background: #4a4a50; }
+    input[type="number"], input[type="text"] { background: #111; text-align: center; border: 1px solid #444; }
+    input[type="text"] { text-align: left; padding: 6px 8px; width: 130px; }
+    
+    /* Área de Renderizado */
+    #viewer-container { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 16px; background-color: #323236; position: relative; }
+    .page-card { position: relative; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.4); background: #fff; }
+    canvas { display: block; width: 100%; height: auto; }
+    
+    /* Capa de Texto para Búsqueda */
+    .textLayer { position: absolute; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden; opacity: 0.2; line-height: 1.0; }
+    .textLayer span { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+    .highlight { background-color: yellow; color: transparent; opacity: 0.6; }
+  </style>
+</head>
+<body oncontextmenu="return false;">
+
+  <div class="toolbar">
+    <div class="toolbar-group">
+      <button onclick="changePage(-1)">&#9664;</button>
+      <span>Pág <input type="number" id="page-num" value="1" min="1" style="width:45px;" onchange="goToPage(this.value)"> / <span id="page-count">-</span></span>
+      <button onclick="changePage(1)">&#9654;</button>
+    </div>
+    
+    <div class="toolbar-group">
+      <input type="text" id="search-input" placeholder="Buscar texto..." onkeyup="if(event.key==='Enter') searchNext()">
+      <button onclick="searchNext()">&#128065;</button>
+      <span id="search-results" style="font-size:11px; color:#aaa;"></span>
+    </div>
+
+    <div class="toolbar-group">
+      <button onclick="zoom(-0.15)">-</button>
+      <button onclick="zoom(0.15)">+</button>
+    </div>
+  </div>
+
+  <div id="viewer-container">
+    <div class="page-card" id="page-card">
+      <canvas id="pdf-canvas"></canvas>
+      <div id="text-layer" class="textLayer"></div>
+    </div>
+  </div>
+
+  <script>
+    // Bloqueo de atajos de teclado para guardar/imprimir
+    document.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'p' || e.key === 's' || e.key === 'u')) {
+        e.preventDefault();
+      }
+    });
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const pdfUrl = urlParams.get('file');
+
+    let pdfDoc = null,
+        pageNum = 1,
+        pageRendering = false,
+        pageNumPending = null,
+        scale = 1.2,
+        searchMatches = [],
+        currentMatchIdx = -1;
+
+    const canvas = document.getElementById('pdf-canvas');
+    const ctx = canvas.getContext('2d');
+    const textLayerDiv = document.getElementById('text-layer');
+
+    if (!pdfUrl) {
+      alert("No se especificó la URL del archivo PDF.");
+    } else {
+      pdfjsLib.getDocument(pdfUrl).promise.then(function(pdfDoc_) {
+        pdfDoc = pdfDoc_;
+        document.getElementById('page-count').textContent = pdfDoc.numPages;
+        renderPage(pageNum);
+      }).catch(function(error) {
+        console.error("Error al cargar PDF:", error);
+      });
+    }
+
+    function renderPage(num) {
+      pageRendering = true;
+      pdfDoc.getPage(num).then(function(page) {
+        const viewport = page.getViewport({ scale: scale });
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        const renderContext = { canvasContext: ctx, viewport: viewport };
+        const renderTask = page.render(renderContext);
+
+        renderTask.promise.then(function() {
+          pageRendering = false;
+          if (pageNumPending !== null) {
+            renderPage(pageNumPending);
+            pageNumPending = null;
+          }
+          return page.getTextContent();
+        }).then(function(textContent) {
+          textLayerDiv.innerHTML = '';
+          textLayerDiv.style.width = canvas.width + 'px';
+          textLayerDiv.style.height = canvas.height + 'px';
+          pdfjsLib.renderTextLayer({
+            textContent: textContent,
+            container: textLayerDiv,
+            viewport: viewport,
+            textDivs: []
+          });
+        });
+      });
+      document.getElementById('page-num').value = num;
+    }
+
+    function queueRenderPage(num) {
+      if (pageRendering) { pageNumPending = num; } 
+      else { renderPage(num); }
+    }
+
+    function changePage(delta) {
+      if (pageNum + delta >= 1 && pageNum + delta <= pdfDoc.numPages) {
+        pageNum += delta;
+        queueRenderPage(pageNum);
+      }
+    }
+
+    function goToPage(val) {
+      const p = parseInt(val);
+      if (p >= 1 && p <= pdfDoc.numPages) {
+        pageNum = p;
+        queueRenderPage(pageNum);
+      }
+    }
+
+    function zoom(delta) {
+      scale = Math.max(0.6, scale + delta);
+      queueRenderPage(pageNum);
+    }
+
+    function searchNext() {
+      const term = document.getElementById('search-input').value.trim().toLowerCase();
+      if (!term || !pdfDoc) return;
+
+      // Resaltar en la página actual
+      const spans = textLayerDiv.querySelectorAll('span');
+      let found = false;
+      spans.forEach(span => {
+        if (span.textContent.toLowerCase().includes(term)) {
+          span.classList.add('highlight');
+          found = true;
+        } else {
+          span.classList.remove('highlight');
+        }
+      });
+
+      document.getElementById('search-results').textContent = found ? "Coincidencias visibles" : "Sin coincidencias en pág.";
+    }
+  </script>
+</body>
+</html>
